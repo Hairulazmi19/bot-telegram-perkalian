@@ -84,7 +84,7 @@ async def ask_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 
 # Fungsi yang menangani input angka atau ekspresi dari pengguna
-async def calculate(update: Update, context: ContextTypes.DEFAULT_TAPE) -> int:
+async def calculate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Melakukan perhitungan dan mengakhiri percakapan."""
     operation = context.user_data.get("operation")
     user_input = update.message.text
