@@ -1,7 +1,15 @@
 import os
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+)
 
 # Ambil token dari environment variable untuk keamanan
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -12,83 +20,153 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Fungsi untuk command /start
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Mengirim pesan ketika command /start dijalankan."""
+# Definisikan state untuk ConversationHandler
+SELECTING_ACTION, PERFORMING_CALCULATION = range(2)
+
+# Definisikan callback data untuk tombol
+(
+    ADD,
+    SUBTRACT,
+    MULTIPLY,
+    DIVIDE,
+    COMBINED,
+) = (
+    "tambah",
+    "kurang",
+    "kali",
+    "bagi",
+    "gabungan",
+)
+
+
+# Fungsi yang dipanggil saat command /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Memulai percakapan dan menampilkan menu utama."""
     user = update.effective_user
-    await update.message.reply_html(
-        f"Halo {user.mention_html()}! 👋\n\n"
-        f"Saya adalah bot kalkulator serbaguna. Gunakan perintah berikut:\n"
-        f"<code>/tambah [angka1] [angka2]</code> - Untuk penjumlahan\n"
-        f"<code>/kurang [angka1] [angka2]</code> - Untuk pengurangan\n"
-        f"<code>/kali [angka1] [angka2]</code> - Untuk perkalian\n"
-        f"<code>/bagi [angka1] [angka2]</code> - Untuk pembagian\n\n"
-        f"<b>Contoh:</b> <code>/tambah 10 5</code>"
-    )
-
-# Fungsi untuk melakukan operasi perhitungan
-async def hitung(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fungsi generik untuk menangani semua operasi matematika."""
-    command = update.message.text.split()[0].replace('/', '') # Mendapatkan nama command: 'tambah', 'kurang', dll.
     
-    # Cek apakah pengguna memberikan dua argumen (angka)
-    if len(context.args) != 2:
-        await update.message.reply_text(f"Gagal! Harap berikan DUA angka saja.\nContoh: /{command} 10 5")
-        return
+    # Buat tombol-tombol inline
+    keyboard = [
+        [InlineKeyboardButton("1. Penjumlahan", callback_data=ADD)],
+        [InlineKeyboardButton("2. Pengurangan", callback_data=SUBTRACT)],
+        [InlineKeyboardButton("3. Perkalian", callback_data=MULTIPLY)],
+        [InlineKeyboardButton("4. Pembagian", callback_data=DIVIDE)],
+        [InlineKeyboardButton("5. Gabungan (contoh: 5 * (3+2))", callback_data=COMBINED)],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await update.message.reply_html(
+        f"Halo {user.mention_html()}! 👋\n\nSilakan pilih operasi matematika yang ingin Anda lakukan:",
+        reply_markup=reply_markup,
+    )
+    
+    # Masuk ke state pertama: memilih aksi
+    return SELECTING_ACTION
 
-    try:
-        # Ubah argumen dari teks menjadi angka (float untuk mendukung desimal)
-        angka1 = float(context.args[0])
-        angka2 = float(context.args[1])
-        hasil = 0
-        operator = ''
 
-        # Lakukan operasi berdasarkan command yang dipanggil
-        if command == "tambah":
-            hasil = angka1 + angka2
-            operator = '+'
-        elif command == "kurang":
-            hasil = angka1 - angka2
-            operator = '-'
-        elif command == "kali":
-            hasil = angka1 * angka2
-            operator = '×' # Menggunakan simbol perkalian
-        elif command == "bagi":
-            # Cek pembagian dengan nol
-            if angka2 == 0:
-                await update.message.reply_text("Error: Tidak bisa melakukan pembagian dengan nol.")
-                return
-            hasil = angka1 / angka2
-            operator = '÷' # Menggunakan simbol pembagian
+# Fungsi yang dipanggil setelah pengguna menekan tombol
+async def ask_for_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Meminta input kepada pengguna berdasarkan pilihan mereka."""
+    query = update.callback_query
+    await query.answer() # Wajib dipanggil untuk memberitahu Telegram bahwa tombol sudah diproses
+    
+    operation = query.data
+    context.user_data["operation"] = operation # Simpan operasi yang dipilih
+    
+    if operation in [ADD, SUBTRACT, MULTIPLY, DIVIDE]:
+        prompt = "Baik, silakan masukkan <b>dua angka</b> dipisahkan oleh spasi (contoh: <code>10 5</code>):"
+    else: # Untuk operasi gabungan
+        prompt = "Baik, silakan masukkan <b>ekspresi matematika</b> yang ingin dihitung (contoh: <code>(100 + 50) / 2</code>):"
         
-        # Kirim hasilnya kembali ke pengguna
-        await update.message.reply_text(f"Hasil dari {angka1} {operator} {angka2} adalah\n👉 **{hasil}**", parse_mode='Markdown')
+    await query.edit_message_text(text=prompt, parse_mode='HTML')
+    
+    # Pindah ke state kedua: melakukan kalkulasi
+    return PERFORMING_CALCULATION
 
-    except ValueError:
-        # Tangani jika input yang diberikan bukan angka
-        await update.message.reply_text("Gagal! Pastikan Anda memasukkan angka yang valid.")
-    except Exception as e:
-        # Tangani error tak terduga lainnya
-        logger.error(f"Error pada command {command}: {e}")
-        await update.message.reply_text("Maaf, terjadi error tak terduga.")
+
+# Fungsi yang menangani input angka atau ekspresi dari pengguna
+async def calculate(update: Update, context: ContextTypes.DEFAULT_TAPE) -> int:
+    """Melakukan perhitungan dan mengakhiri percakapan."""
+    operation = context.user_data.get("operation")
+    user_input = update.message.text
+    
+    try:
+        if operation == COMBINED:
+            # PERINGATAN KEAMANAN: Menggunakan eval() bisa berisiko.
+            # Di sini kita coba batasi hanya untuk karakter matematika yang aman.
+            allowed_chars = "0123456789.+-*/() "
+            if not all(char in allowed_chars for char in user_input):
+                raise ValueError("Ekspresi mengandung karakter tidak valid.")
+            
+            # eval() akan menghitung string sebagai ekspresi Python
+            result = eval(user_input)
+            await update.message.reply_text(f"Hasil dari <code>{user_input}</code> adalah\n\n👉 <b>{result}</b>", parse_mode='HTML')
+
+        else: # Untuk operasi dasar
+            parts = user_input.split()
+            if len(parts) != 2:
+                raise ValueError("Harap masukkan DUA angka.")
+                
+            angka1 = float(parts[0])
+            angka2 = float(parts[1])
+            result = 0
+            operator = ''
+
+            if operation == ADD:
+                result = angka1 + angka2
+                operator = '+'
+            elif operation == SUBTRACT:
+                result = angka1 - angka2
+                operator = '-'
+            elif operation == MULTIPLY:
+                result = angka1 * angka2
+                operator = '×'
+            elif operation == DIVIDE:
+                if angka2 == 0:
+                    await update.message.reply_text("Error: Tidak bisa melakukan pembagian dengan nol.")
+                    return ConversationHandler.END
+                result = angka1 / angka2
+                operator = '÷'
+            
+            await update.message.reply_text(f"Hasil dari {angka1} {operator} {angka2} adalah\n\n👉 <b>{result}</b>", parse_mode='HTML')
+            
+    except ValueError as e:
+        await update.message.reply_text(f"Input tidak valid! {e}. Silakan mulai lagi dengan /start.")
+    except Exception:
+        await update.message.reply_text("Terjadi error saat menghitung ekspresi. Pastikan formatnya benar. Silakan mulai lagi dengan /start.")
+
+    # Mengakhiri percakapan
+    return ConversationHandler.END
+
+# Fungsi untuk membatalkan percakapan
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Membatalkan dan mengakhiri percakapan."""
+    await update.message.reply_text("Operasi dibatalkan. Kirim /start untuk memulai lagi.")
+    return ConversationHandler.END
 
 
 def main() -> None:
     """Fungsi utama untuk menjalankan bot."""
-    # Membuat objek Application
     application = Application.builder().token(TOKEN).build()
-    logger.info("Bot berhasil dibuat.")
 
-    # Mendaftarkan semua handler untuk setiap command
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("tambah", hitung))
-    application.add_handler(CommandHandler("kurang", hitung))
-    application.add_handler(CommandHandler("kali", hitung))
-    application.add_handler(CommandHandler("bagi", hitung))
+    # Membuat ConversationHandler
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            SELECTING_ACTION: [
+                CallbackQueryHandler(ask_for_input)
+            ],
+            PERFORMING_CALCULATION: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, calculate)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+
+    application.add_handler(conv_handler)
     
-    # Menjalankan bot sampai user menekan Ctrl-C
     print("Bot sedang berjalan... Tekan Ctrl+C untuk berhenti.")
     application.run_polling()
+
 
 if __name__ == "__main__":
     main()
